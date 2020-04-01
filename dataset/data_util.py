@@ -9,6 +9,33 @@ import skimage
 import pandas as pd
 
 
+def parse_intrinsics(filepath, trgt_sidelength=None, invert_y=False):
+    # Get camera intrinsics
+    with open(filepath, 'r') as file:
+        f, cx, cy, _ = map(float, file.readline().split())
+        file.readline()
+        scale = float(file.readline())
+        height, width = map(float, file.readline().split())
+
+    if trgt_sidelength is not None:
+        cx = cx/width * trgt_sidelength
+        cy = cy/height * trgt_sidelength
+        f = trgt_sidelength / height * f
+
+    fx = f
+    if invert_y:
+        fy = -f
+    else:
+        fy = f
+
+    # Build the intrinsic matrices
+    full_intrinsic = np.array([[fx, 0., cx, 0.],
+                               [0., fy, cy, 0],
+                               [0., 0, 1, 0],
+                               [0, 0, 0, 1]])
+
+    return full_intrinsic
+
 def load_rgb(path, sidelength=None):
     # print(path)
     img = imageio.imread(path)
@@ -56,7 +83,7 @@ def load_depth(path, sidelength=None, zRange=None):
     img = cv2.imread(path, cv2.IMREAD_UNCHANGED).astype(np.float32)
 
     if sidelength is not None:
-        img = cv2.resize(img, (sidelength, sidelength), interpolation=cv2.INTER_NEAREST)
+        img = cv2.resize(img, (sidelength, sidelength), interpolation=cv2.INTER_LINEAR)
 
     if len(img.shape) == 3:
         img = img[:, :, :1]

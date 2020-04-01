@@ -9,6 +9,9 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
+from matplotlib import cm
+import re
+
 
 def get_latest_file(root_dir):
     """Returns path to latest file in a directory."""
@@ -17,9 +20,15 @@ def get_latest_file(root_dir):
     return latest_file
 
 
-def parse_comma_separated_integers(string):
-    return list(map(int, string.split(',')))
+def parse_num_range(s):
+    '''Accept either a comma separated list of numbers 'a,b,c' or a range 'a-c' and return as a list of ints.'''
 
+    range_re = re.compile(r'^(\d+)-(\d+)$')
+    m = range_re.match(s)
+    if m:
+        return list(range(int(m.group(1)), int(m.group(2))+1))
+    vals = s.split(',')
+    return [int(x) for x in vals]
 
 def convert_image(img):
     if not isinstance(img, np.ndarray):
@@ -37,51 +46,24 @@ def convert_image(img):
 def write_img(img, path):
     cv2.imwrite(path, img.astype(np.uint8))
 
-
 def in_out_to_param_count(in_out_tuples):
     return np.sum([np.prod(in_out) + in_out[-1] for in_out in in_out_tuples])
 
-def parse_intrinsics(filepath, trgt_sidelength=None, invert_y=False):
-    # Get camera intrinsics
-    with open(filepath, 'r') as file:
-        f, cx, cy, _ = map(float, file.readline().split())
-        grid_barycenter = torch.Tensor(list(map(float, file.readline().split())))
-        scale = float(file.readline())
-        height, width = map(float, file.readline().split())
-
-        try:
-            world2cam_poses = int(file.readline())
-        except ValueError:
-            world2cam_poses = None
-
-    if world2cam_poses is None:
-        world2cam_poses = False
-
-    world2cam_poses = bool(world2cam_poses)
-
-    if trgt_sidelength is not None:
-        cx = cx/width * trgt_sidelength
-        cy = cy/height * trgt_sidelength
-        f = trgt_sidelength / height * f
-
-    fx = f
-    if invert_y:
-        fy = -f
-    else:
-        fy = f
-
-    # Build the intrinsic matrices
-    full_intrinsic = np.array([[fx, 0., cx, 0.],
-                               [0., fy, cy, 0],
-                               [0., 0, 1, 0],
-                               [0, 0, 0, 1]])
-
-    return full_intrinsic, grid_barycenter, scale, world2cam_poses
-
-def lin2img(tensor):
+def lin2img(tensor, color_map=None):
     batch_size, num_samples, channels = tensor.shape
     sidelen = np.sqrt(num_samples).astype(int)
-    return tensor.permute(0,2,1).view(batch_size, channels, sidelen, sidelen)
+
+    if color_map is not None:
+        tensor = tensor.squeeze(2).long()
+        output_img = torch.cat([color_map[p].unsqueeze(0) for p in tensor], dim=0)
+        channels = output_img.shape[-1]
+ 
+    else:
+        output_img = tensor
+
+    return output_img.permute(0,2,1).view(batch_size, channels, sidelen, sidelen)
+
+    
 
 def num_divisible_by_2(number):
     i = 0
@@ -127,7 +109,7 @@ def custom_load(model, path, discriminator=None, overwrite_embeddings=False, ove
     whole_dict = torch.load(checkpoint_path)
 
     if overwrite_embeddings:
-        del whole_dict['model']['obj_embedding.weight']
+        del whole_dict['model']['latent_codes.weight']
 
     if overwrite_renderer:
         keys_to_remove = [key for key in whole_dict['model'].keys() if 'rendering_net' in key]

@@ -1,7 +1,7 @@
 '''Pytorch implementations of hyper-network modules.'''
 import torch
 import torch.nn as nn
-from pytorch_prototyping import pytorch_prototyping
+from pytorch_prototyping import FCBlock
 import functools
 
 
@@ -209,7 +209,7 @@ class HyperLinear(nn.Module):
         self.in_ch = in_ch
         self.out_ch = out_ch
 
-        self.hypo_params = pytorch_prototyping.FCBlock(in_features=hyper_in_ch,
+        self.hypo_params = FCBlock(in_features=hyper_in_ch,
                                                         hidden_ch=hyper_hidden_ch,
                                                         num_hidden_layers=hyper_num_hidden_layers,
                                                         out_features=(in_ch * out_ch) + out_ch,

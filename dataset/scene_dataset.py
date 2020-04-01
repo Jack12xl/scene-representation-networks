@@ -2,7 +2,7 @@ import os
 import torch
 import numpy as np
 from glob import glob
-import data_util
+from dataset import data_util
 import util
 
 
@@ -25,7 +25,7 @@ class SceneInstanceDataset():
         self.img_sidelength = img_sidelength
         self.instance_dir = instance_dir
 
-        color_dir = os.path.join(instance_dir, "rgb")
+        color_dir = os.path.join(instance_dir, "render_*.png")
         pose_dir = os.path.join(instance_dir, "pose")
         param_dir = os.path.join(instance_dir, "params")
 

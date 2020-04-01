@@ -1,3 +1,9 @@
+# output && data && config
+logs/
+train_configs/
+test_configs/
+*.pkl
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

@@ -8,122 +8,30 @@ import util
 import skimage.measure
 from torch.nn import functional as F
 
-import torchvision.models as models
-
 from pytorch_prototyping import *
 import custom_layers
 import geometry
 import hyperlayers
 
-from itertools import chain
 
-class SegEncoder(nn.Module):
-    def __init__(   self, 
-                    img_sidelength=128,
-                    num_classes=19,
-                    latent_dim=256,
-                    kernel_size=7,
-                    shortcut=None):
-        
-        super().__init__()
-
-        self.num_classes = num_classes
-        self.img_sidelength = img_sidelength
+class Encoder(nn.Module):
+    def __init__(self, latent_dim, img_size):
         self.latent_dim = latent_dim
+        self.img_size = img_size
 
-        if shortcut is not None:
-            self.shortcut = shortcut
-        else:
-            self.shortcut = torch.empty(self.latent_dim).cuda()
-            nn.init.normal_(self.shortcut, mean=0.0, std=1.0)
-        
-        n_hidden = 128
-
-        ks = kernel_size
-        pw = ks // 2
-
-        self._emb = nn.Sequential(
-            nn.Conv2d(
-                num_classes, n_hidden, kernel_size=ks, padding=pw),
-            nn.InstanceNorm2d(num_features=n_hidden,affine=False),
-            nn.ReLU()
-        )
-
-        self._gamma = nn.Sequential(
-            nn.Conv2d(n_hidden, self.latent_dim, kernel_size=ks, padding=pw),
-            nn.AdaptiveAvgPool2d(output_size=(1, 1)))
-
-        self._beta = nn.Sequential( 
-            nn.Conv2d(n_hidden, self.latent_dim, kernel_size=ks, padding=pw),
-            nn.AdaptiveAvgPool2d(output_size=(1, 1)))
-
-    def forward(self, x):
-        seg = x
-        # print('**** seg = ', seg.shape)
-        seg = F.one_hot(seg.squeeze().long(), num_classes=self.num_classes).permute(0, 2, 1)
-        # print('**** seg_one_hot = ', seg.shape)
-
-        seg = seg.view(-1, self.num_classes, self.img_sidelength, self.img_sidelength).float()
-
-        embedding = self._emb(seg)
-        gamma = self._gamma(embedding).squeeze()
-        beta = self._beta(embedding).squeeze()
-
-        # print('*** gamma = ', gamma.shape)
-        # print('*** beta = ', beta.shape)
-
-        out = self.shortcut * (1 + gamma) + beta
-
-        # print('**** out = ', out.shape)
-
-        return out
-
-class ConvEncoder(nn.Module):
-    def __init__(   self, 
-                    img_sidelength=128,
-                    num_classes=19,
-                    latent_dim=256):
-        
-        super().__init__()
-
-        self.img_sidelength = img_sidelength
-        self.latent_dim = latent_dim  
-        self.num_classes = num_classes      
-
-        self.encoder = models.resnet18(pretrained=False)
-        self.activation = nn.ReLU()
-        self.encoder.fc = nn.Identity()
-
-        if latent_dim < 512:
-            self.encoder.layer4= nn.Identity()
-        
-        self.encoder.conv1 = nn.Conv2d(num_classes, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
-        self.activation = nn.Tanh()
-
-    def forward(self, x):
-        seg = x
-        seg = F.one_hot(seg.squeeze().long(), num_classes=self.num_classes).permute(0, 2, 1)
-        seg = seg.view(-1, self.num_classes, self.img_sidelength, self.img_sidelength).float()
-
-        embedding = self.encoder(seg)
-        embedding = self.activation(embedding)
-
-        return embedding
+        self.preprocess = 
 
 
-class SRNsModel(nn.Module):
+class ESRNsModel(nn.Module):
     def __init__(self,
-                 num_instances,
                  latent_dim,
                  tracing_steps,
                  has_params=False,
                  fit_single_srn=False,
                  use_unet_renderer=False,
-                 use_image_encoder=False,
                  freeze_networks=False,
                  out_channels=3,
-                 img_sidelength=128,
-                 output_sidelength=128):
+                 img_sidelength=128):
         super().__init__()
 
         self.latent_dim = latent_dim
@@ -137,11 +45,6 @@ class SRNsModel(nn.Module):
         self.fit_single_srn = fit_single_srn
         self.out_channels = out_channels
         self.img_sidelength = img_sidelength
-        self.output_sidelength = output_sidelength
-        self.num_instances = num_instances
-
-        # List of logs
-        self.logs = list()
 
         if self.fit_single_srn:  # Fit a single scene with a single SRN (no hypernetworks)
             self.phi = FCBlock( hidden_ch=self.num_hidden_units_phi,
@@ -150,14 +53,8 @@ class SRNsModel(nn.Module):
                                 out_features=self.num_hidden_units_phi)
         else:
             # Auto-decoder: each scene instance gets its own code vector z
-            if use_image_encoder:
-                self.image_encoder = ConvEncoder(img_sidelength=output_sidelength)
-                self.get_embedding = lambda x: self.image_encoder(x['rgb'].cuda())
-            else:
-                self.latent_codes = nn.Embedding(self.num_instances, self.latent_dim).cuda()
-                nn.init.normal_(self.latent_codes.weight, mean=0, std=0.01)
-                self.get_embedding = lambda x: self.latent_codes(x['instance_idx'].long().cuda())
-                if not self.fit_single_srn: self.logs.append(("embedding", "", self.latent_codes.weight, 500))
+            self.latent_codes = nn.Embedding(self.num_instances, self.latent_dim).cuda()
+            nn.init.normal_(self.latent_codes.weight, mean=0, std=0.01)
 
             self.hyper_phi = hyperlayers.HyperFC(hyper_in_ch=self.latent_dim,
                                                  hyper_num_hidden_layers=1,
@@ -183,15 +80,17 @@ class SRNsModel(nn.Module):
                         outermost_linear=True)
 
         if self.freeze_networks:
-            all_network_params = (list(self.pixel_generator.parameters())
-                                  + list(self.ray_marcher.parameters())
-                                  + list(self.hyper_phi.parameters()))
-
+            all_network_params = (self.pixel_generator.parameters()
+                                  + self.ray_marcher.parameters()
+                                  + self.hyper_phi.parameters())
             for param in all_network_params:
                 param.requires_grad = False
 
         # Losses
         self.l2_loss = nn.MSELoss(reduction="mean")
+
+        # List of logs
+        self.logs = list()
 
         print(self)
         print("Number of parameters:")
@@ -205,9 +104,6 @@ class SRNsModel(nn.Module):
         :return: Regularization loss on final depth map.
         """
         _, depth = prediction
-
-        # print('*** depth = ', depth.shape, torch.zeros_like(depth).shape)
-        # print(torch.max(depth), torch.min(depth))
 
         neg_penalty = (torch.min(depth, torch.zeros_like(depth)) ** 2)
         return torch.mean(neg_penalty) * 10000
@@ -231,51 +127,26 @@ class SRNsModel(nn.Module):
         
         xent_loss = nn.CrossEntropyLoss(reduction='mean')
 
-        # print('**** get_cls_loss: ')
-        # print(prediction[0].shape, ground_truth['rgb'].shape, np.unique(ground_truth['rgb'].detach().cpu().numpy()))
-
+        # convert gt to one-hot labels
         pred_imgs, _ = prediction
         pred_imgs = pred_imgs.permute(0, 2, 1)
 
-        trgt_imgs = ground_truth['rgb'].squeeze(-1).long()
+        trgt_imgs = ground_truth['rgb'].squeeze().long()
         trgt_imgs = trgt_imgs.cuda()
 
-        # print(pred_imgs.shape, trgt_imgs.shape, np.unique(trgt_imgs.detach().cpu().numpy()))
+        # print('pred_imgs = ',torch.max(pred_imgs), torch.min(pred_imgs))
+        # print('trgt_imgs = ',torch.max(trgt_imgs), torch.min(trgt_imgs))
 
         # compute softmax_xent loss
         loss = xent_loss(pred_imgs, trgt_imgs)
 
         return loss
 
-    def get_geo_loss(self, prediction, ground_truth):
-        assert 'depth' in ground_truth.keys(), 'GT depth does not exist.'
-
-        geo_loss = nn.SmoothL1Loss(reduction='none')
-
-        trgt_depth = ground_truth['depth'].cuda()
-
-        pred_img, pred_depth = prediction
-
-        nonzero_cnt = 1.0
-        
-        if pred_img.shape[-1] in [1, 3]:
-            pred_img = torch.argmax(pred_img, dim=2).long().unsqueeze(2)
-            pred_depth = pred_depth * (pred_img != 0).float()
-        
-        loss = geo_loss(pred_depth, trgt_depth)
-        nonzero_cnt = (loss > 1e-12).sum(axis=1).clamp(min=1).float()
-
-        # return torch.mean(loss.sum(axis=1) / nonzero_cnt) 
-        return torch.mean(loss.sum() / nonzero_cnt)
-
     def get_latent_loss(self):
         """Computes loss on latent code vectors (L_{latent} in eq. 6 in paper)
         :return: Latent loss.
         """
-        if self.fit_single_srn:
-            self.latent_reg_loss = 0
-        else:
-            self.latent_reg_loss = torch.mean(self.z ** 2)
+        self.latent_reg_loss = torch.mean(self.z ** 2)
 
         return self.latent_reg_loss
 
@@ -346,7 +217,7 @@ class SRNsModel(nn.Module):
         pred_imgs, _ = prediction
         return util.lin2img(pred_imgs)
 
-    def write_updates(self, writer, predictions, ground_truth=None, iter=0, mode="", color_map=None):
+    def write_updates(self, writer, predictions, ground_truth, iter, mode=""):
         """Writes tensorboard summaries using tensorboardx api.
 
         :param writer: tensorboardx writer object.
@@ -357,18 +228,19 @@ class SRNsModel(nn.Module):
         """            
         predictions, depth_maps = predictions
         batch_size, _, channels = predictions.shape
+        colorize = False
+
+        trgt_imgs = ground_truth['rgb']
+        trgt_imgs = trgt_imgs.cuda()
 
         if not channels in [1, 3]:
             # classification
             predictions = torch.argmax(predictions, dim=2).long().unsqueeze(2)
-
-        if ground_truth is not None:
-            trgt_imgs = ground_truth['rgb']
-            trgt_imgs = trgt_imgs.cuda()
-            if not channels in [1, 3]: trgt_imgs = trgt_imgs.long()
-            assert predictions.shape == trgt_imgs.shape
-        else:
-            trgt_imgs = None
+            colorize = True
+            trgt_imgs = trgt_imgs.long()
+        
+        # print('*** predictions = ', predictions.shape, trgt_imgs.shape)
+        assert predictions.shape == trgt_imgs.shape
 
         prefix = mode + '/'
 
@@ -379,6 +251,8 @@ class SRNsModel(nn.Module):
             if not iter % every_n:
                 if type == "image":
                     writer.add_image(name, content.detach().cpu().numpy(), iter)
+                    writer.add_scalar(name + "_min", content.min(), iter)
+                    writer.add_scalar(name + "_max", content.max(), iter)
                 elif type == "figure":
                     writer.add_figure(name, content, iter, close=True)
                 elif type == "histogram":
@@ -388,9 +262,9 @@ class SRNsModel(nn.Module):
                 elif type == "embedding" and (mode == 'train'):
                         writer.add_embedding(mat=content, global_step=iter)
 
-        if (iter % 1000 == 0) or (mode == 'test'):
-            output_vs_gt = torch.cat((predictions, trgt_imgs), dim=0) if trgt_imgs is not None else predictions
-            output_vs_gt = util.lin2img(output_vs_gt, color_map)
+        if (not iter % 100) or (mode == 'val'):
+            output_vs_gt = torch.cat((predictions, trgt_imgs), dim=0)
+            output_vs_gt = util.lin2img(output_vs_gt, colorize)
 
             writer.add_image(prefix + "Output_vs_gt",
                              torchvision.utils.make_grid(output_vs_gt,
@@ -398,19 +272,15 @@ class SRNsModel(nn.Module):
                                                          normalize=True).cpu().detach().numpy(),
                              iter)
 
-            if trgt_imgs is not None:
-                rgb_loss = ((predictions.float().cuda() - trgt_imgs.float().cuda()) ** 2).mean(dim=2, keepdim=True)
-                rgb_loss = util.lin2img(rgb_loss)
+            rgb_loss = ((predictions.float().cuda() - trgt_imgs.float().cuda()) ** 2).mean(dim=2, keepdim=True)
+            rgb_loss = util.lin2img(rgb_loss)
 
-                fig = util.show_images([rgb_loss[i].detach().cpu().numpy().squeeze()
-                                        for i in range(batch_size)])
-                writer.add_figure(prefix + "rgb_error_fig",
-                                fig,
-                                iter,
-                                close=True)
-
-                # writer.add_scalar(prefix + "trgt_min", trgt_imgs.min(), iter)
-                # writer.add_scalar(prefix + "trgt_max", trgt_imgs.max(), iter)
+            fig = util.show_images([rgb_loss[i].detach().cpu().numpy().squeeze()
+                                    for i in range(batch_size)])
+            writer.add_figure(prefix + "rgb_error_fig",
+                              fig,
+                              iter,
+                              close=True)
 
             depth_maps_plot = util.lin2img(depth_maps)
             writer.add_image(prefix + "pred_depth",
@@ -418,56 +288,38 @@ class SRNsModel(nn.Module):
                                                          scale_each=True,
                                                          normalize=True).cpu().detach().numpy(),
                              iter)
-            if 'depth' in ground_truth.keys():
-                trgt_depth = ground_truth['depth'].float().cuda()
-                pred_depth = depth_maps * (predictions != 0).float().cuda()
-                geo_loss = torch.abs(pred_depth - trgt_depth)
 
-                geo_loss = util.lin2img(geo_loss)
-                fig = util.show_images([geo_loss[i].detach().cpu().numpy().squeeze()
-                                        for i in range(batch_size)])
-                writer.add_figure(prefix + "depth_error_fig",
-                                fig,
-                                iter,
-                                close=True)
+        writer.add_scalar(prefix + "out_min", predictions.min(), iter)
+        writer.add_scalar(prefix + "out_max", predictions.max(), iter)
 
-        # writer.add_scalar(prefix + "out_min", predictions.min(), iter)
-        # writer.add_scalar(prefix + "out_max", predictions.max(), iter)
+        writer.add_scalar(prefix + "trgt_min", trgt_imgs.min(), iter)
+        writer.add_scalar(prefix + "trgt_max", trgt_imgs.max(), iter)
 
-        if iter and hasattr(self, 'latent_reg_loss'):
+        if iter:
             writer.add_scalar(prefix + "latent_reg_loss", self.latent_reg_loss, iter)
 
-    def forward(self, pose, z, intrinsics, uv, device=None):
+    def forward(self, input, z=None):
         self.logs = list() # log saves tensors that"ll receive summaries when model"s write_updates function is called
 
         # Parse model input.
-        # instance_idcs = input["instance_idx"].long().cuda()
-        # pose = input["pose"].cuda()
-        # intrinsics = input["intrinsics"].cuda()
-        # uv = input["uv"].cuda().float()
-
-        pose = pose.cuda()
-        intrinsics = intrinsics.cuda()
-        uv = uv.cuda().float()
-        self.z = z.cuda()
+        instance_idcs = input["instance_idx"].long().cuda()
+        pose = input["pose"].cuda()
+        intrinsics = input["intrinsics"].cuda()
+        uv = input["uv"].cuda().float()
 
         # print('*** 0: process input - ', instance_idcs.shape, pose.shape, intrinsics.shape, uv.shape)
 
         if self.fit_single_srn:
             phi = self.phi
         else:
-            # if z is not None:
-            #     self.z = z
-            # elif 'param' in input.keys():
-
-            # if self.has_params: # If each instance has a latent parameter vector, we"ll use that one.
-            #     if z is None:
-            #         self.z = input["param"].cuda()
-            #     else:
-            #         self.z = z
-            # else: # Else, we"ll use the embedding.
-            #     # print('*** 1: embedding - ', self.latent_dim, self.num_instances, instance_idcs)
-            #     self.z = self.latent_codes(instance_idcs)
+            if self.has_params: # If each instance has a latent parameter vector, we"ll use that one.
+                if z is None:
+                    self.z = input["param"].cuda()
+                else:
+                    self.z = z
+            else: # Else, we"ll use the embedding.
+                # print('*** 1: embedding - ', self.latent_dim, self.num_instances, instance_idcs)
+                self.z = self.latent_codes(instance_idcs)
 
             # print('*** 1: build phi - ', self.z.shape, torch.max(self.z), torch.min(self.z), self.fit_single_srn)
             phi = self.hyper_phi(self.z) # Forward pass through hypernetwork yields a (callable) SRN.
@@ -488,13 +340,6 @@ class SRNsModel(nn.Module):
         novel_views = self.pixel_generator(v)
         # print('***** novel_views = ', novel_views.shape)
 
-        if self.output_sidelength != self.img_sidelength:
-            novel_views = novel_views.permute(0,2,1).view(
-                -1, self.out_channels, self.img_sidelength, self.img_sidelength) 
-            novel_views = F.interpolate(
-                novel_views, size=(self.output_sidelength, self.output_sidelength), mode='bilinear')
-            novel_views = novel_views.view(-1, self.out_channels, self.output_sidelength**2).permute(0,2,1)
-            
         # Calculate normal map
         with torch.no_grad():
             batch_size = uv.shape[0]
@@ -507,9 +352,8 @@ class SRNsModel(nn.Module):
                               torchvision.utils.make_grid(normals, scale_each=True, normalize=True), 100))
 
         if not self.fit_single_srn:
-            self.logs.append(("scalar", "embed_min", z.min(), 1))
-            self.logs.append(("scalar", "embed_max", z.max(), 1))
-
-        # print('***** depth_map = ', depth_maps.shape)
+            self.logs.append(("embedding", "", self.latent_codes.weight, 500))
+            self.logs.append(("scalar", "embed_min", self.z.min(), 1))
+            self.logs.append(("scalar", "embed_max", self.z.max(), 1))
 
         return novel_views, depth_maps

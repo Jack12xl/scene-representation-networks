@@ -5,13 +5,22 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 
-import dataio
+from dataset.body_dataset import BodyPartDataset
+
 from torch.utils.data import DataLoader
 from srns import *
 import util
+import random
+import re
+
+from datetime import datetime
+
+_NUM_OBSERVATIONS = 25
 
 def _parse_num_range(s):
     '''Accept either a comma separated list of numbers 'a,b,c' or a range 'a-c' and return as a list of ints.'''
+
+    s = s.replace('"', '')
 
     range_re = re.compile(r'^(\d+)-(\d+)$')
     m = range_re.match(s)
@@ -25,22 +34,26 @@ p.add('-c', '--config_filepath', required=False, is_config_file=True, help='Path
 
 # Multi-resolution training: Instead of passing only a single value, each of these command-line arguments take comma-
 # separated lists. If no multi-resolution training is required, simply pass single values (see default values).
-p.add_argument('--img_sidelengths', type=str, default='64', required=False,
+p.add_argument('--img_sidelengths', type=_parse_num_range, default='128', required=False,
                help='Progression of image sidelengths.'
                     'If comma-separated list, will train on each sidelength for respective max_steps.'
                     'Images are downsampled to the respective resolution.')
-p.add_argument('--max_steps_per_img_sidelength', type=str, default="200000",
+p.add_argument('--output_sidelength', type=int, default=512, required=False,
+               help='Target resolution.')
+p.add_argument('--out_channels', type=int, default=3, required=False,
+               help='Output channels.')
+p.add_argument('--max_steps_per_img_sidelength', type=_parse_num_range, default="200000",
                help='Maximum number of optimization steps.'
                     'If comma-separated list, is understood as steps per image_sidelength.')
-p.add_argument('--batch_size_per_img_sidelength', type=str, default="64",
+p.add_argument('--batch_size_per_img_sidelength', type=_parse_num_range, default="8",
                help='Training batch size.'
                     'If comma-separated list, will train each image sidelength with respective batch size.')
 
 # Training options
-p.add_argument('--data_root', required=True, help='Path to directory with training data.')
-p.add_argument('--val_root', required=False, help='Path to directory with validation data.')
+p.add_argument('--data_root', type=str, default='/data/anpei/facial-data/seg_face_8000', help='Path to directory with training data.')
 p.add_argument('--logging_root', type=str, default='./logs',
                required=False, help='path to directory where checkpoints & tensorboard events will be saved.')
+p.add_argument('--data_type', type=str, default='seg', help='Identifier to image files.')
 
 p.add_argument('--lr', type=float, default=5e-5, help='learning rate. default=5e-5')
 
@@ -68,20 +81,15 @@ p.add_argument('--overwrite_embeddings', action='store_true', default=False,
 p.add_argument('--start_step', type=int, default=0,
                help='If continuing from checkpoint, which iteration to start counting at.')
 
-p.add_argument('--specific_observation_idcs', type=_parse_num_range, default=None,
+p.add_argument('--sample_observations_train', type=_parse_num_range, default=None,
+               help='Only pick a subset of specific observations for each instance.')
+p.add_argument('--sample_observations_val', type=_parse_num_range, default=None,
                help='Only pick a subset of specific observations for each instance.')
 
-p.add_argument('--max_num_instances_train', type=int, default=-1,
-               help='If \'data_root\' has more instances, only the first max_num_instances_train are used')
-p.add_argument('--max_num_observations_train', type=int, default=50, required=False,
-               help='If an instance has more observations, only the first max_num_observations_train are used')
-p.add_argument('--max_num_instances_val', type=int, default=10, required=False,
-               help='If \'val_root\' has more instances, only the first max_num_instances_val are used')
-p.add_argument('--max_num_observations_val', type=int, default=10, required=False,
-               help='Maximum numbers of observations per validation instance')
-
-p.add_argument('--has_params', action='store_true', default=False,
-               help='Whether each object instance already comes with its own parameter vector.')
+p.add_argument('--sample_instances_train', type=_parse_num_range, default=None,
+               help='Only pick a subset of all instances.')
+p.add_argument('--sample_instances_val', type=_parse_num_range, default=None,
+               help='Only pick a subset of all instances.')
 
 # Model options
 p.add_argument('--tracing_steps', type=int, default=10, help='Number of steps of intersection tester.')
@@ -91,76 +99,112 @@ p.add_argument('--fit_single_srn', action='store_true', required=False,
                help='Only fit a single SRN for a single scene (not a class of SRNs) --> no hypernetwork')
 p.add_argument('--use_unet_renderer', action='store_true',
                help='Whether to use a DeepVoxels-style unet as rendering network or a per-pixel 1x1 convnet')
+p.add_argument('--use_image_encoder', action='store_true',
+               help='Whether to use a resnet based image encoder')
 p.add_argument('--embedding_size', type=int, default=256,
                help='Dimensionality of latent embedding.')
 
 opt = p.parse_args()
 
+# print(opt)
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def train():
-    # Parses indices of specific observations from comma-separated list.
-    img_sidelengths = util.parse_comma_separated_integers(opt.img_sidelengths)
-    batch_size_per_sidelength = util.parse_comma_separated_integers(opt.batch_size_per_img_sidelength)
-    max_steps_per_sidelength = util.parse_comma_separated_integers(opt.max_steps_per_img_sidelength)
+    torch.autograd.set_detect_anomaly(True)
+    img_sidelengths = opt.img_sidelengths
+    output_sidelength = opt.output_sidelength
 
-    train_dataset = dataio.SceneClassDataset(root_dir=opt.data_root,
-                                             max_num_instances=opt.max_num_instances_train,
-                                             max_observations_per_instance=opt.max_num_observations_train,
-                                             img_sidelength=img_sidelengths[0],
-                                             specific_observation_idcs=opt.specific_observation_idcs,
-                                             samples_per_instance=1)
+    batch_size_per_sidelength = opt.batch_size_per_img_sidelength
+    max_steps_per_sidelength = opt.max_steps_per_img_sidelength
+    no_validation = opt.no_validation
+
+    # random pick tran/val dataset
+    print('Loading train dataset: %s'%(opt.data_root))
+
+    if opt.sample_observations_train == [-1]:
+        opt.sample_observations_train = [random.choice(list(range(_NUM_OBSERVATIONS)))]
+
+    train_dataset = BodyPartDataset(
+        root_dir=opt.data_root, 
+        data_type=opt.data_type,
+        img_sidelength=output_sidelength, 
+        sample_observations=opt.sample_observations_train, 
+        sample_instances=opt.sample_instances_train)
+
+    print('[DONE] load train dataset.', len(train_dataset))
 
     assert (len(img_sidelengths) == len(batch_size_per_sidelength)), \
         "Different number of image sidelengths passed than batch sizes."
     assert (len(img_sidelengths) == len(max_steps_per_sidelength)), \
         "Different number of image sidelengths passed than max steps."
 
-    if not opt.no_validation:
-        assert (opt.val_root is not None), "No validation directory passed."
+    if not no_validation:
+        if opt.sample_instances_val is None:
+            opt.sample_instances_val = opt.sample_instances_train
 
-        val_dataset = dataio.SceneClassDataset(root_dir=opt.val_root,
-                                               max_num_instances=opt.max_num_instances_val,
-                                               max_observations_per_instance=opt.max_num_observations_val,
-                                               img_sidelength=img_sidelengths[0],
-                                               samples_per_instance=1)
-        collate_fn = val_dataset.collate_fn
+        if opt.sample_observations_val is None:
+            opt.sample_observations_val = list(set(range(_NUM_OBSERVATIONS)) - set(opt.sample_observations_train))
+            opt.sample_observations_val = [random.choice(opt.sample_observations_val)]
+
+        val_dataset = BodyPartDataset(
+            root_dir=opt.data_root, 
+            data_type=opt.data_type,
+            img_sidelength=output_sidelength,
+            sample_observations=opt.sample_observations_val,
+            sample_instances=opt.sample_instances_val)
+        print('[DONE] load val dataset.', len(val_dataset))
+        
         val_dataloader = DataLoader(val_dataset,
-                                    batch_size=2,
+                                    batch_size=8,
                                     shuffle=False,
                                     drop_last=True,
                                     collate_fn=val_dataset.collate_fn)
 
+    print('Init SRN model.')
     model = SRNsModel(num_instances=train_dataset.num_instances,
                       latent_dim=opt.embedding_size,
-                      has_params=opt.has_params,
                       fit_single_srn=opt.fit_single_srn,
                       use_unet_renderer=opt.use_unet_renderer,
+                      use_image_encoder=opt.use_image_encoder,
                       tracing_steps=opt.tracing_steps,
-                      freeze_networks=opt.freeze_networks)
-
+                      freeze_networks=opt.freeze_networks,
+                      out_channels=opt.out_channels,
+                      img_sidelength=img_sidelengths[0],
+                      output_sidelength=output_sidelength)
+    if torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)
+    
+    model.to(device)
     model.train()
-    model.cuda()
 
     if opt.checkpoint_path is not None:
-        print("Loading model from %s" % opt.checkpoint_path)
+        print("> Loading model from %s" % opt.checkpoint_path)
         util.custom_load(model, path=opt.checkpoint_path,
                          discriminator=None,
                          optimizer=None,
                          overwrite_embeddings=opt.overwrite_embeddings)
 
-    ckpt_dir = os.path.join(opt.logging_root, 'checkpoints')
-    events_dir = os.path.join(opt.logging_root, 'events')
+    print('[DONE] Init SRN model.')
 
-    util.cond_mkdir(opt.logging_root)
-    util.cond_mkdir(ckpt_dir)
-    util.cond_mkdir(events_dir)
+    now = datetime.now()
+    task_name = os.path.splitext(os.path.basename(opt.config_filepath))[0]
+    log_dir = os.path.join(opt.logging_root, now.strftime('%m%d%H')+task_name)
+    
+    print('Logging dir = ', log_dir)
+
+    ckpt_dir = os.path.join(log_dir, 'checkpoints')
+    events_dir = os.path.join(log_dir, 'events')
+
+    os.makedirs(ckpt_dir, exist_ok=True)
+    os.makedirs(events_dir, exist_ok=True)
 
     # Save command-line parameters log directory.
-    with open(os.path.join(opt.logging_root, "params.txt"), "w") as out_file:
+    with open(os.path.join(log_dir, "params.txt"), "w") as out_file:
         out_file.write('\n'.join(["%s: %s" % (key, value) for key, value in vars(opt).items()]))
 
     # Save text summary of model into log directory.
-    with open(os.path.join(opt.logging_root, "model.txt"), "w") as out_file:
+    with open(os.path.join(log_dir, "model.txt"), "w") as out_file:
         out_file.write(str(model))
 
     optimizer = torch.optim.Adam(model.parameters(), lr=opt.lr)
@@ -178,7 +222,7 @@ def train():
         print("\n" + "#" * 10)
         print("Training with sidelength %d for %d steps with batch size %d" % (img_sidelength, max_steps, batch_size))
         print("#" * 10 + "\n")
-        train_dataset.set_img_sidelength(img_sidelength)
+        train_dataset.set_img_sidelength(output_sidelength)
 
         # Need to instantiate DataLoader every time to set new batch size.
         train_dataloader = DataLoader(train_dataset,
@@ -187,16 +231,29 @@ def train():
                                       drop_last=True,
                                       collate_fn=train_dataset.collate_fn,
                                       pin_memory=opt.preload)
-
         cum_max_steps += max_steps
 
         # Loops over epochs.
         while True:
             for model_input, ground_truth in train_dataloader:
-                model_outputs = model(model_input)
+                
+                pose = model_input['pose']
+                intrinsics = model_input['intrinsics']
+                uv = model_input['uv']
+                if 'params' in model_input.keys() and model_input['params'] is not None:
+                    z = model_input['params']
+                else:
+                    z = model.get_embedding(model_input)
+
+                model_outputs = model(pose, z, intrinsics, uv)
+
                 optimizer.zero_grad()
 
-                dist_loss = model.get_image_loss(model_outputs, ground_truth)
+                if opt.out_channels in [1, 3]:
+                    dist_loss = model.get_image_loss(model_outputs, ground_truth)
+                else:
+                    dist_loss = model.get_cls_loss(model_outputs, ground_truth)
+
                 reg_loss = model.get_regularization_loss(model_outputs, ground_truth)
                 latent_loss = model.get_latent_loss()
 
@@ -212,37 +269,45 @@ def train():
 
                 optimizer.step()
 
-                print("Iter %07d   Epoch %03d   L_img %0.4f   L_latent %0.4f   L_depth %0.4f" %
-                      (iter, epoch, weighted_dist_loss, weighted_latent_loss, weighted_reg_loss))
+                # print("Iter %07d   Epoch %03d   L_img %0.4f   L_latent %0.4f   L_depth %0.4f" %
+                #       (iter, epoch, weighted_dist_loss, weighted_latent_loss, weighted_reg_loss))
 
-                model.write_updates(writer, model_outputs, ground_truth, iter)
-                writer.add_scalar("scaled_distortion_loss", weighted_dist_loss, iter)
-                writer.add_scalar("scaled_regularization_loss", weighted_reg_loss, iter)
-                writer.add_scalar("scaled_latent_loss", weighted_latent_loss, iter)
-                writer.add_scalar("total_loss", total_loss, iter)
+                model.write_updates(writer, model_outputs, ground_truth, iter, mode="train", color_map=train_dataset.color_map)
+                writer.add_scalar("Loss/scaled_distortion_loss", weighted_dist_loss, iter)
+                writer.add_scalar("Loss/scaled_regularization_loss", weighted_reg_loss, iter)
+                writer.add_scalar("Loss/scaled_latent_loss", weighted_latent_loss, iter)
+                writer.add_scalar("Loss/total_loss", total_loss, iter)
 
-                if iter % opt.steps_til_val == 0 and not opt.no_validation:
-                    print("Running validation set...")
+                if iter % opt.steps_til_val == 0 and not no_validation:
+                    print("[%06d] Running validation set..."%(iter))
 
                     model.eval()
                     with torch.no_grad():
-                        psnrs = []
-                        ssims = []
                         dist_losses = []
+                        geo_losses = []
                         for model_input, ground_truth in val_dataloader:
-                            model_outputs = model(model_input)
+                            pose = model_input['pose']
+                            intrinsics = model_input['intrinsics']
+                            uv = model_input['uv']
+                            if 'params' in model_input.keys() and model_input['params'] is not None:
+                                z = model_input['params']
+                            else:
+                                z = model.get_embedding(model_input)
 
-                            dist_loss = model.get_image_loss(model_outputs, ground_truth).cpu().numpy()
-                            psnr, ssim = model.get_psnr(model_outputs, ground_truth)
-                            psnrs.append(psnr)
-                            ssims.append(ssim)
+                            model_outputs = model(pose, z, intrinsics, uv)
+
+                            if opt.out_channels in [1, 3]:
+                                dist_loss = model.get_image_loss(model_outputs, ground_truth)
+                            else:
+                                dist_loss = model.get_cls_loss(model_outputs, ground_truth)
+
+                            dist_loss = dist_loss.cpu().numpy()
                             dist_losses.append(dist_loss)
 
-                            model.write_updates(writer, model_outputs, ground_truth, iter, mode='val')
+                            model.write_updates(writer, model_outputs, ground_truth, iter, mode='val', color_map=val_dataset.color_map)
+                        writer.add_scalar("val/dist_loss", np.mean(dist_losses), iter)
+                        if geo_losses: writer.add_scalar("val/geo_loss", np.mean(geo_losses), iter)
 
-                        writer.add_scalar("val_dist_loss", np.mean(dist_losses), iter)
-                        writer.add_scalar("val_psnr", np.mean(psnrs), iter)
-                        writer.add_scalar("val_ssim", np.mean(ssims), iter)
                     model.train()
 
                 iter += 1

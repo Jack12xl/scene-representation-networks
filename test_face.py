@@ -4,7 +4,8 @@ import os, time, datetime
 import torch
 import numpy as np
 
-import dataio
+from dataset.face_dataset import FaceClassDataset
+
 from torch.utils.data import DataLoader
 from srns import *
 import util
@@ -36,12 +37,10 @@ p.add_argument('--logging_root', type=str, default='./logs',
 p.add_argument('--batch_size', type=int, default=32, help='Batch size.')
 p.add_argument('--preload', action='store_true', default=False, help='Whether to preload data to RAM.')
 
-p.add_argument('--max_num_instances', type=int, default=-1,
-               help='If \'data_root\' has more instances, only the first max_num_instances are used')
-p.add_argument('--specific_observation_idcs', type=str, default=None,
+p.add_argument('--sample_observations_train', type=_parse_num_range, default=None,
                help='Only pick a subset of specific observations for each instance.')
-p.add_argument('--has_params', action='store_true', default=False,
-               help='Whether each object instance already comes with its own parameter vector.')
+p.add_argument('--sample_instances_train', type=_parse_num_range, default=None,
+               help='Only pick a subset of all instances.')
 
 p.add_argument('--save_out_first_n',type=int, default=250, help='Only saves images of first n object instances.')
 p.add_argument('--checkpoint_path', default=None, help='Path to trained model.')
@@ -68,19 +67,19 @@ def test():
     else:
         specific_observation_idcs = None
 
-    dataset = dataio.SceneClassDataset(root_dir=opt.data_root,
-                                       max_num_instances=opt.max_num_instances,
-                                       sample_observations=specific_observation_idcs,
-                                       max_observations_per_instance=-1,
-                                       samples_per_instance=1,
-                                       img_sidelength=opt.img_sidelength)
+    dataset = dataio.FaceClassDataset(
+        root_dir=opt.data_root, 
+        img_sidelength=opt.img_sidelength, 
+        sample_observations=opt.sample_observations, 
+        sample_instances=opt.sample_instances)
+
     dataset = DataLoader(dataset,
                          collate_fn=dataset.collate_fn,
                          batch_size=1,
                          shuffle=False,
                          drop_last=False)
 
-    model = SRNsModel(num_instances=dataset.num_instances,
+    model = SRNsModel(num_instances=opt.num_instances,
                       latent_dim=opt.embedding_size,
                       has_params=opt.has_params,
                       fit_single_srn=opt.fit_single_srn,

@@ -2,7 +2,7 @@ import geometry
 import torchvision
 import util
 
-from pytorch_prototyping import pytorch_prototyping
+from pytorch_prototyping import Unet, UpsamplingNet, Conv2dSame
 
 import torch
 from torch import nn
@@ -115,11 +115,14 @@ class Raymarcher(nn.Module):
             states.append(state)
             world_coords.append(new_world_coords)
 
-            depth = geometry.depth_from_world(world_coords[-1], cam2world)
+            depth = geometry.depth_from_world(world_coords[-1], cam2world)                
+            
+            # log.append(('scalar', 'dmax_s%02d'%(step), depths[-1].max(),100))
+            # log.append(('scalar', 'dmin_s%02d'%(step), depths[-1].min(),100))
 
-            if self.training:
-                print("Raymarch step %d: Min depth %0.6f, max depth %0.6f" %
-                      (step, depths[-1].min().detach().cpu().numpy(), depths[-1].max().detach().cpu().numpy()))
+            # if self.training:
+            #     print("Raymarch step %d: Min depth %0.6f, max depth %0.6f" %
+            #           (step, depths[-1].min().detach().cpu().numpy(), depths[-1].max().detach().cpu().numpy()))
 
             depths.append(depth)
 
@@ -146,11 +149,13 @@ class DeepvoxelsRenderer(nn.Module):
                  nf0,
                  in_channels,
                  input_resolution,
-                 img_sidelength):
+                 img_sidelength,
+                 out_channels=3):
         super().__init__()
 
         self.nf0 = nf0
         self.in_channels = in_channels
+        self.out_channels = out_channels
         self.input_resolution = input_resolution
         self.img_sidelength = img_sidelength
 
@@ -161,28 +166,28 @@ class DeepvoxelsRenderer(nn.Module):
 
     def build_net(self):
         self.net = [
-            pytorch_prototyping.Unet(in_channels=self.in_channels,
-                                     out_channels=3 if self.num_upsampling <= 0 else 4 * self.nf0,
-                                     outermost_linear=True if self.num_upsampling <= 0 else False,
-                                     use_dropout=True,
-                                     dropout_prob=0.1,
-                                     nf0=self.nf0 * (2 ** self.num_upsampling),
-                                     norm=nn.BatchNorm2d,
-                                     max_channels=8 * self.nf0,
-                                     num_down=self.num_down_unet)
+            Unet(   in_channels=self.in_channels,
+                    out_channels=self.out_channels if self.num_upsampling <= 0 else 4 * self.nf0,
+                    outermost_linear=True if self.num_upsampling <= 0 else False,
+                    use_dropout=True,
+                    dropout_prob=0.1,
+                    nf0=self.nf0 * (2 ** self.num_upsampling),
+                    norm=nn.BatchNorm2d,
+                    max_channels=8 * self.nf0,
+                    num_down=self.num_down_unet)
         ]
 
         if self.num_upsampling > 0:
             self.net += [
-                pytorch_prototyping.UpsamplingNet(per_layer_out_ch=self.num_upsampling * [self.nf0],
+                UpsamplingNet(per_layer_out_ch=self.num_upsampling * [self.nf0],
                                                   in_channels=4 * self.nf0,
                                                   upsampling_mode='transpose',
                                                   use_dropout=True,
                                                   dropout_prob=0.1),
-                pytorch_prototyping.Conv2dSame(self.nf0, out_channels=self.nf0 // 2, kernel_size=3, bias=False),
+                Conv2dSame(self.nf0, out_channels=self.nf0 // 2, kernel_size=3, bias=False),
                 nn.BatchNorm2d(self.nf0 // 2),
                 nn.ReLU(True),
-                pytorch_prototyping.Conv2dSame(self.nf0 // 2, 3, kernel_size=3)
+                Conv2dSame(self.nf0 // 2, out_channels=self.out_channels, kernel_size=3)
             ]
 
         self.net += [nn.Tanh()]
@@ -192,4 +197,4 @@ class DeepvoxelsRenderer(nn.Module):
         batch_size, _, ch = input.shape
         input = input.permute(0, 2, 1).view(batch_size, ch, self.img_sidelength, self.img_sidelength)
         out = self.net(input)
-        return out.view(batch_size, 3, -1).permute(0, 2, 1)
+        return out.view(batch_size, self.out_channels, -1).permute(0, 2, 1)

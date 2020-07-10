@@ -8,9 +8,11 @@ import shutil
 import skimage
 import pandas as pd
 
-
 def parse_intrinsics(filepath, trgt_sidelength=None, invert_y=False):
     # Get camera intrinsics
+    if os.path.splitext(filepath)[-1] == '.npy':
+        return np.load(filepath)
+
     with open(filepath, 'r') as file:
         f, cx, cy, _ = map(float, file.readline().split())
         file.readline()
@@ -53,16 +55,55 @@ def load_rgb(path, sidelength=None):
     img = img.transpose(2, 0, 1)
     return img
 
+
 def load_gray(path, sidelength=None):
 
-    img = cv2.imread(path, cv2.IMREAD_UNCHANGED).astype(np.float32)
+    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE).astype(np.float32)
     assert (len(img.shape) == 2 or img.shape[2] == 1)
 
     if sidelength is not None:
         img = cv2.resize(img, (sidelength, sidelength), interpolation=cv2.INTER_NEAREST)
     
-    img = img[None, :, :]
+    img = img.reshape(1, -1).transpose(1, 0)
+
     return img
+
+
+def load_seg_map(path, sidelength=None, num_classes=20, remap_fn=None):
+
+    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+
+    assert (len(img.shape) == 2 or img.shape[2] == 1), path
+
+    if sidelength is not None:
+        img = cv2.resize(img, (sidelength, sidelength), interpolation=cv2.INTER_NEAREST)
+    
+    img = img.reshape(1, -1).transpose(1, 0)
+
+    if np.max(img) > num_classes:
+        scaler = np.max(img)/(num_classes-1)
+        img = img // scaler
+
+    if remap_fn is not None:
+        img = remap_fn(img)
+
+    return img.astype(np.uint8)
+
+def load_video_seg(path, sidelength=None):
+    img = cv2.imread(path, cv2.IMREAD_UNCHANGED).astype(np.float32)
+
+    H, W, C = img.shape    
+    seg = img[:, W//2:, 0]
+
+    if sidelength is not None:
+        seg = cv2.resize(seg, (sidelength, sidelength), interpolation=cv2.INTER_NEAREST)
+    
+    seg = seg.reshape(1, -1).transpose(1, 0)
+
+    # print('*** load video seg: ', seg.shape)
+
+    return seg
+
 
 # def load_depth(path, sidelength=None):
 #     img = cv2.imread(path, cv2.IMREAD_UNCHANGED).astype(np.float32)

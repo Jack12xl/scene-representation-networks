@@ -1,3 +1,3 @@
 {
-    "python.pythonPath": "/home/anpei/anaconda3/envs/srns/bin/python"
+    "python.formatting.provider": "black"
 }

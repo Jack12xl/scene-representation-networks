@@ -1,16 +1,35 @@
 import os
+from pathlib import Path
 import torch
 import numpy as np
 from glob import glob
 
+import cv2
 from dataset import data_util
 
 import util
 
-_COLOR_MAP = np.asarray([[0, 0, 0], [204, 0, 0], [76, 153, 0], [204, 204, 0], [51, 51, 255], [204, 0, 204], [0, 255, 255], [255, 204, 204], [102, 51, 0], [255, 0, 0], [102, 204, 0], [255, 255, 0], [0, 0, 153], [0, 0, 204], [255, 51, 153], [0, 204, 204], [0, 51, 0], [255, 153, 51], [0, 204, 0]])
+_COLOR_MAP = np.asarray([[0, 0, 0], [204, 0, 0], [76, 153, 0], [204, 204, 0], 
+                        [51, 51, 255], [204, 0, 204], [0, 255, 255], [255, 204, 204], 
+                        [102, 51, 0], [255, 0, 0], [102, 204, 0], [255, 255, 0], 
+                        [0, 0, 153], [0, 0, 204], [255, 51, 153], [0, 204, 204], 
+                        [0, 51, 0], [255, 153, 51], [0, 204, 0], [0, 204, 153]])
+
+_NUM_CLASSES = 20
+# label_list = ['background', 'skin', 'l_brow', 'r_brow', 'l_eye', 'r_eye', 'eye_g', 'l_ear', 'r_ear', 'ear_r',
+#               'nose', 'mouth', 'u_lip', 'l_lip', 'neck', 'neck_l', 'cloth', 'hair', 'hat']
+
+def _id_remap(seg):
+    # label_list = ['background', 'skin', 'l_brow', 'r_brow', 'l_eye', 'r_eye', 'eye_g', 'l_ear', 'r_ear', 'ear_r',
+    #               'nose', 'mouth', 'u_lip', 'l_lip', 'neck', 'neck_l', 'cloth', 'hair', 'hat']
+    remap_list = np.array([0,1,2,2,3,3,4,5,6,7,8,9,9,10,11,12,13,14,15,16])
+    return remap_list[seg.astype(np.uint8)]
 
 def _campos2matrix(cam_pos, cam_center=None, cam_up=None):
-    _cam_target = np.asarray([0,0.11,0.1]).reshape((1, 3)) if cam_center is None else cam_center
+    _cam_target = np.asarray([0,0.11,0.1]) if cam_center is None else cam_center
+    _cam_target = _cam_target.reshape((1, 3))
+    # print('*** cam_center = ', _cam_target.shape)
+
     _cam_up = np.asarray([0.0, 1.0, 0.0]) if cam_up is None else cam_up
 
     cam_dir = (_cam_target-cam_pos)
@@ -19,7 +38,7 @@ def _campos2matrix(cam_pos, cam_center=None, cam_up=None):
     cam_right = cam_right / np.linalg.norm(cam_right)
     cam_up = np.cross(cam_right, cam_dir)
 
-    cam_R = np.concatenate([cam_right, -cam_up, cam_dir], axis=0).T
+    cam_R = np.concatenate([cam_right.T, -cam_up.T, cam_dir.T], axis=1)
 
     cam_P = np.eye(4)
     cam_P[:3, :3] = cam_R
@@ -50,12 +69,16 @@ def _rand_cam_cube(Rx=0.5, Ry=0.5, Rz=1.0, num_samples=15):
     # print('*** cam_pos = ', cam_pos.shape, cam_pos)
     return cam_pos
 
-def _rand_cam_sphere(R=2.0, num_samples=15, random=False):
+def _rand_cam_sphere(   R=1.5, 
+                        num_samples=15, 
+                        random=False, 
+                        cam_center=None, 
+                        sample_range=None):
     side_len = np.ceil(np.sqrt(num_samples)).astype(np.uint8)
     cam_pos = []
 
-    _PHI_RANGE = [np.pi/2-0.6, np.pi/2+0.6]
-    _THETA_RANGE = [np.pi/2-0.3, np.pi/2+0.3]
+    _PHI_RANGE = sample_range[0] if sample_range is not None else [np.pi/2-0.6, np.pi/2+0.6]
+    _THETA_RANGE = sample_range[1] if sample_range is not None else [np.pi/2-0.3, np.pi/2+0.3]
 
     if random:
         _theta = np.random.random_sample((side_len,)) * (_THETA_RANGE[1]-_THETA_RANGE[0]) + _THETA_RANGE[0]
@@ -75,7 +98,7 @@ def _rand_cam_sphere(R=2.0, num_samples=15, random=False):
             y = R * np.sin(theta) * np.sin(phi)
             z = R * np.cos(theta)
             
-            cam_pos.append(np.array([x, z, y]))
+            cam_pos.append(np.array([x, z, y])+cam_center)
         
         _p *= -1
         _idx = _cur_idx
@@ -85,12 +108,15 @@ def _rand_cam_sphere(R=2.0, num_samples=15, random=False):
     
     return cam_pos
 
-def _rand_cam_plane(R=1.2, num_samples=15):
+def _rand_cam_plane(R=1.2, 
+                    num_samples=15, 
+                    cam_center=[0, 0.11, 0.1], 
+                    sample_range=None):
     side_len = np.ceil(np.sqrt(num_samples)).astype(np.uint8)
     cam2world = []
 
-    _X_RANGE = [0.05, -0.05]
-    _Y_RANGE = [0.13, 0.12]
+    _X_RANGE = sample_range[0] if sample_range is not None else [0.05, -0.05]
+    _Y_RANGE = sample_range[1] if sample_range is not None else [0.13, 0.12]
 
     _x = np.linspace(_X_RANGE[0], _X_RANGE[1], side_len)
     _y = np.linspace(_Y_RANGE[0], _Y_RANGE[1], side_len)
@@ -102,8 +128,9 @@ def _rand_cam_plane(R=1.2, num_samples=15):
         for i in range(len(_y)):
             _cur_idx = int(_idx + i*_p)
             y = _y[_cur_idx]
+
             cam2world.append(_campos2matrix(
-                np.array([x, y, R]), np.array([x, y, R-1.0]).reshape((1, 3))))
+                np.array([x, y, R]+cam_center), (np.array([x, y, R-1.0])+np.array(cam_center)).reshape((1, 3))))
         _p *= -1
         _idx = _cur_idx
 
@@ -111,29 +138,33 @@ def _rand_cam_plane(R=1.2, num_samples=15):
     
     return cam2world
 
-def _get_random_poses(sample_radius, num_samples, mode):    
-    if mode == 'spiral':
-        cam_pos = _rand_cam_spiral(sample_radius, num_samples)
-    elif mode == 'sphere':
-        cam_pos = _rand_cam_sphere(sample_radius, num_samples)
-    elif mode == 'load':
-        _DEFAULT_POSE = '/data/anpei/facial-data/seg_face_8000/cam2world.npy'
-        cam_pos = np.load(_DEFAULT_POSE)
-        cam_pos = cam_pos[:num_samples, :3, 3].squeeze()
-    elif mode == 'plane':
-        return _rand_cam_plane(sample_radius, num_samples)
-    else:
-        cam_pos = _rand_cam_cube(num_samples=num_samples)
+
+def _get_random_poses(sample_radius, num_samples, mode, cam_center=None, cam_pos=None, sample_range=None):
+    # print('*** _get_random_poses cam_center = ', cam_center)
+    if cam_pos is None:
+        if mode == 'spiral':
+            cam_pos = _rand_cam_spiral(sample_radius, num_samples)
+        elif mode == 'sphere':
+            cam_pos = _rand_cam_sphere(sample_radius, num_samples, cam_center=cam_center, sample_range=sample_range)
+        elif mode == 'load':
+            _DEFAULT_POSE = '/data/anpei/facial-data/seg_face_syn/779/cam2world.npy'
+            cam_pos = np.load(_DEFAULT_POSE)
+            cam_pos = cam_pos[:num_samples, :3, 3].squeeze()
+        elif mode == 'plane':
+            return _rand_cam_plane(sample_radius, num_samples, cam_center=cam_center, sample_range=sample_range)
+        else:
+            cam_pos = _rand_cam_cube(num_samples=num_samples)
     
+    assert cam_pos is not None, 'Campose not specified'
     cam2world = []
 
     for i in range(num_samples):
-        cam2world.append(_campos2matrix(cam_pos[i]))
+        cam2world.append(_campos2matrix(cam_pos[i], np.asarray(cam_center).reshape((1, 3))))
 
     cam2world = np.asarray(cam2world)
 
     return cam2world
-
+    
 
 class FaceInstanceDataset():
     """This creates a dataset class for a single object instance (such as a single car)."""
@@ -142,32 +173,49 @@ class FaceInstanceDataset():
                  instance_idx,
                  cam2world,
                  intrinsics,
+                 param='params.npy',
                  data_type='seg',
                  instance_path=None,
                  load_depth=False,
                  img_sidelength=None,
                  sample_observations=None,
+                 remap_fn=None,
                  shuffle=True):
 
         self.data_root = os.path.dirname(instance_path)
+        self.data_id = os.path.basename(instance_path).split('.')[0]
+
         self.instance_idx = instance_idx
         self.img_sidelength = img_sidelength
         self.data_type = data_type
         self.load_depth = load_depth
 
-        self.intrinsics = intrinsics
+        self.remap_fn = remap_fn
+
         self.poses = np.load(cam2world) if isinstance(cam2world, str) else cam2world
         self.color_paths = sorted(glob(instance_path))
 
+        self.intrinsics = data_util.parse_intrinsics(intrinsics) if isinstance(intrinsics, str) else intrinsics
+        self.intrinsics = torch.Tensor(self.intrinsics).float()
+
+        # print('*** intrinsics: ', self.intrinsics.shape)
+        
+        if len(self.intrinsics.shape) == 2:
+            num_views = max(len(self.color_paths), len(self.poses))
+            self.intrinsics = self.intrinsics.unsqueeze(0).expand(num_views, -1, -1)
+
+        # print('*** color_paths: ', len(self.color_paths))
+
         self.z_range = None
         z_range_fp = os.path.join(self.data_root, 'zRange.npy')
-        if os.path.exists(z_range_fp):
+        if load_depth and os.path.exists(z_range_fp):
+            # print('*** load zRange: ', z_range_fp)
             self.z_range = np.load(z_range_fp)
 
-        self.param = None
-        param_fp = os.path.join(self.data_root, 'params.npy')
-        if os.path.exists(param_fp):
-            self.param = np.load(param_fp)
+        if param is not None:
+            param_fp = os.path.join(self.data_root, param)
+            if os.path.exists(param_fp):
+                self.param = np.load(param_fp)
 
         if shuffle:
             idxs = np.random.permutation(len(self.color_paths))
@@ -184,14 +232,16 @@ class FaceInstanceDataset():
 
     def set_img_sidelength(self, new_img_sidelength):
         """For multi-resolution training: Updates the image sidelength with whichimages are loaded."""
-        self.img_sidelength = new_img_sidelength
+        self.img_sidelength = new_img_sidelength        
+
+    def set_intrinsics(self, cam_int):
+        self.intrinsics = cam_int
 
     def __len__(self):
-        return self.poses.shape[0]
-
+        return max(len(self.color_paths), len(self.poses))
+        
     def __getitem__(self, idx):
         
-        intrinsics = torch.Tensor(self.intrinsics).float()
         pose = self.poses[idx]
 
         uv = np.mgrid[0:self.img_sidelength, 0:self.img_sidelength].astype(np.int32)
@@ -200,47 +250,47 @@ class FaceInstanceDataset():
 
         sample = {
             'instance_idx': torch.Tensor([self.instance_idx]).squeeze(),
+            'data_id': self.data_id,
             'observation_idx': idx,
-            'rgb': None,
             'pose': torch.from_numpy(pose).float(),
             'uv': uv,
-            'intrinsics': intrinsics,
+            'intrinsics': self.intrinsics[idx],
         }
 
-        if self.param is not None:
+        if hasattr(self, 'param'):
             sample['params'] = torch.from_numpy(self.param).float()
 
         if hasattr(self, 'color_paths'):
             img_fp = self.color_paths[idx]
             if self.data_type == 'seg':
-                seg_img = data_util.load_gray(img_fp, sidelength=self.img_sidelength)
-                
-                if np.max(seg_img) > 19:
-                    seg_img /= 10.0
-                
-                # print('**** seg_img = ', seg_img.shape)
-                img_channels = seg_img.shape[0]
-                seg_img = seg_img.reshape(img_channels, -1).transpose(1, 0)
+                seg_img = data_util.load_seg_map(
+                    img_fp, sidelength=self.img_sidelength, 
+                    num_classes=_NUM_CLASSES, remap_fn=self.remap_fn)
+
                 sample['rgb'] = torch.from_numpy(seg_img).float()
+            
             elif self.data_type == 'render':
                 render_img = data_util.load_rgb(img_fp, sidelength=self.img_sidelength)
                 render_img = render_img.reshape(3, -1).transpose(1, 0)
                 sample['rgb'] = torch.from_numpy(render_img).float()
+        
+        if self.z_range is not None:
+            sample['z_range'] = torch.FloatTensor(self.z_range[idx])
 
-        if self.load_depth:
+        if hasattr(self, 'load_depth') and self.load_depth:
             depth_path = os.path.join(
                 self.data_root,
                 os.path.basename(img_fp).replace(self.data_type, 'depth'))
 
-            if self.z_range is not None:
-                depth_img = data_util.load_depth(
-                    depth_path, sidelength=self.img_sidelength, zRange=self.z_range[idx])
-                # print('=== depth = ', np.max(depth_img), np.min(depth_img), self.z_range[idx])
-            else:
-                depth_img = data_util.load_depth(depth_path, sidelength=self.img_sidelength)
+            zRange = self.z_range[idx] if self.z_range is not None else None
+
+            depth_img = data_util.load_depth(
+                depth_path, sidelength=self.img_sidelength, zRange=zRange)
+            # print('=== depth = ', np.max(depth_img), np.min(depth_img), sample['z_range'])
+
             depth_img = depth_img.reshape(1, -1).transpose(1, 0)
             sample['depth'] = torch.from_numpy(depth_img).float()
-            # print('Load depth from %s'%(depth_path), sample['depth'].shape, sample['rgb'].shape)
+            # print('Load depth from %s'%(depth_path), torch.max(sample['depth']), torch.min(sample['rgb'].shape))
 
         return sample
 
@@ -254,14 +304,17 @@ class FaceInstanceRandomPose(FaceInstanceDataset):
                  num_observations=15,
                  sample_radius=2.0,
                  img_sidelength=128,
+                 cam_center=None,
                  mode='cube'):
 
         self.instance_idx = instance_idx
         self.intrinsics = intrinsics
         self.img_sidelength = img_sidelength
+        
+        self.z_range = None
 
         self.poses = _get_random_poses(
-            sample_radius, num_samples=num_observations, mode=mode)
+            sample_radius, num_samples=num_observations, cam_center=cam_center, mode=mode)
             
         self.load_depth = False
 
@@ -271,48 +324,55 @@ class FaceClassDataset(torch.utils.data.Dataset):
     
     Face Labels :
 
-    0: 'background'	1: 'skin'	2: 'nose'
+    0: 'background'	1: 'skin'	2: 'l_nose'
     3: 'eye_g'	4: 'l_eye'	5: 'r_eye'
     6: 'l_brow'	7: 'r_brow'	8: 'l_ear'
     9: 'r_ear'	10: 'mouth'	11: 'u_lip'
     12: 'l_lip'	13: 'hair'	14: 'hat'
     15: 'ear_r'	16: 'neck_l'	17: 'neck'
-    18: 'cloth'	
+    18: 'cloth'	19: r_nose
     
     """
 
     def __init__(self,
                  root_dir,
+                 ckpt_dir=None,
                  data_type='seg',
                  cam2world_fp='cam2world.npy',
-                 intrinsics_fp='intrinsics.txt',
+                 intrinsics_fp='intrinsics.npy',
                  img_sidelength=None,
                  sample_instances=None,
                  sample_observations=None,
                  load_depth=False):
-
-        # print('*** load_depth = ', load_depth)
-
+        
         tot_instances = sorted(glob(os.path.join(root_dir, '*/')))
+
+        if ckpt_dir is not None:
+            idx_fp = os.path.join(ckpt_dir, 'indexing.txt')
+
+            if os.path.exists(idx_fp):
+                print('> Load indexing file from: ', idx_fp)
+                with open(idx_fp, 'r') as f: tot_instances = [x.strip() for x in f.readlines()]
+            else:  
+                print('> Save indexing file to: ', idx_fp)          
+                with open(idx_fp, 'w') as f: f.writelines('\n'.join(tot_instances))
         
         if sample_instances is not None:
             tot_instances=[tot_instances[idx] for idx in sample_instances if idx < len(tot_instances)]
 
         self.num_instances = len(tot_instances)
 
-        img_fp = data_type + '_*.png'
-
+        img_fp = data_type + '_[0-9]*.png'
+        
         tot_imgs = [os.path.join(instance_dir, img_fp) for instance_dir in tot_instances]
         cam2world = [os.path.join(instance_dir, cam2world_fp) for instance_dir in tot_instances]
-        intrinsics = data_util.parse_intrinsics(
-            os.path.join(root_dir, intrinsics_fp), 
-            trgt_sidelength=img_sidelength)
+        intrinsics = [os.path.join(instance_dir, intrinsics_fp) for instance_dir in tot_instances]
 
         self.all_instances = [FaceInstanceDataset(  instance_idx=instance_idx,
                                                     instance_path=instance_fp,
                                                     data_type=data_type,
                                                     cam2world=cam2world[instance_idx],
-                                                    intrinsics=intrinsics,
+                                                    intrinsics=intrinsics[instance_idx],
                                                     img_sidelength=img_sidelength,
                                                     sample_observations=sample_observations,
                                                     load_depth=load_depth)
@@ -324,7 +384,7 @@ class FaceClassDataset(torch.utils.data.Dataset):
         self.num_instances = len(self.all_instances)
         self.load_depth = load_depth
 
-        if data_type == 'seg':
+        if data_type[:3] == 'seg':
             self.color_map = torch.tensor(_COLOR_MAP, dtype=torch.float32) / 255.0
         else:
             self.color_map = None
@@ -336,8 +396,13 @@ class FaceClassDataset(torch.utils.data.Dataset):
         for instance in self.all_instances:
             instance.set_img_sidelength(new_img_sidelength)
 
+    def set_cam_int(self, new_cam_int, ins_idx=None):
+        ins_idx = list(range(len(self.all_instances))) if ins_idx is None else ins_idx
+        for idx in ins_idx:
+            self.all_instances[idx].set_cam_int(new_cam_int)
+
     def __len__(self):
-        return np.sum(self.num_per_instance_observations)
+        return np.sum(self.num_per_instance_observations).astype(np.int)
 
     def get_instance_idx(self, idx):
         """Maps an index into all tuples of all objects to the idx of the tuple relative to the other tuples of that
@@ -375,17 +440,17 @@ class FaceClassDataset(torch.utils.data.Dataset):
         obj_idx, rel_idx = self.get_instance_idx(idx)
 
         # print('obj_idx = ', obj_idx, 'rel_idx = ', rel_idx)
+        observations = [self.all_instances[obj_idx][rel_idx]]
 
-        observations = []
-        observations.append(self.all_instances[obj_idx][rel_idx])
-
-        if self.load_depth:
+        if hasattr(self, 'load_depth') and self.load_depth:
             ground_truth = [{
-                'rgb':ray_bundle['rgb'],
+                'rgb':ray_bundle['rgb'] if 'rgb' in ray_bundle else None,
                 'depth':ray_bundle['depth']} for ray_bundle in observations]
 
         else:
-            ground_truth = [{'rgb':ray_bundle['rgb']} for ray_bundle in observations]
+            ground_truth = [
+                {'rgb':ray_bundle['rgb'] if 'rgb' in ray_bundle else None} 
+                for ray_bundle in observations]
             # print('** ground_truth = ', ground_truth[0]['rgb'].shape)
 
         return observations, ground_truth
@@ -394,14 +459,18 @@ class FaceClassDataset(torch.utils.data.Dataset):
 class FaceRandomPoseDataset(FaceClassDataset):
 
     def __init__(self,
+                 intrinsics=None,
                  sample_radius=1.1,
                  img_sidelength=128,
                  num_instances=100,
                  num_observations=15,
+                 cam_center=None,
                  mode='load'
                  ):
 
-        _DEFAULT_INT = '/data/anpei/facial-data/seg_face_2000/intrinsics.txt'
+        _DEFAULT_INT = intrinsics if intrinsics is not None else '/data/anpei/facial-data/seg_face_0417/intrinsics.txt'
+        print('Load cam_int from: ', _DEFAULT_INT)
+        # print('Camera center: ', cam_center)
 
         if isinstance(num_instances, int):
             num_instances = list(range(num_instances))
@@ -413,6 +482,7 @@ class FaceRandomPoseDataset(FaceClassDataset):
                                                         num_observations=num_observations,
                                                         sample_radius=sample_radius,
                                                         img_sidelength=128,
+                                                        cam_center=cam_center,
                                                         mode=mode)
 
                                 for idx in num_instances]
@@ -420,3 +490,119 @@ class FaceRandomPoseDataset(FaceClassDataset):
         self.color_map = torch.tensor(_COLOR_MAP, dtype=torch.float32) / 255.0
         self.num_per_instance_observations = [len(obj) for obj in self.all_instances]
         self.load_depth = False
+
+
+class CelebAMaskDataset(FaceClassDataset):
+
+    def __init__(self,
+                 root_dir,
+                 ckpt_dir=None,
+                 img_sidelength=128,
+                 num_instances=100
+                 ):
+
+        # _CM_DATA_ROOT = '/data/anpei/facial-data/CelebAMask-HQ/segmap/subfolder'
+        _DEFAULT_INT = os.path.join(root_dir, 'intrinsics.txt')
+        _DEFAULT_CAM = os.path.join(root_dir, 'cam2world.npy')
+
+        idx_fp = os.path.join(ckpt_dir, 'indexing.txt') if ckpt_dir is not None else None
+            
+        if idx_fp is not None and os.path.exists(idx_fp):
+            print('> Load indexing file from: ', idx_fp)
+            with open(idx_fp, 'r') as f:
+                tot_imgs = [x.strip() for x in f.readlines()]
+
+        else:
+            tot_imgs = sorted(glob(os.path.join(root_dir, '*.png')))
+
+            if num_instances > 0 and num_instances < len(tot_imgs):
+                import random
+                tot_imgs = random.choices(tot_imgs, k=num_instances)
+             # save indexing dict
+            with open(idx_fp, 'w') as f:
+                f.writelines('\n'.join(tot_imgs))
+
+        print('Load CelebA, num_instances = ', len(tot_imgs))
+
+        if isinstance(num_instances, int):
+            num_instances = list(range(num_instances))
+
+        intrinsics = data_util.parse_intrinsics(
+            _DEFAULT_INT, trgt_sidelength=img_sidelength)
+
+        cam2world = np.load(_DEFAULT_CAM)
+
+        self.all_instances = [FaceInstanceDataset(instance_idx=instance_idx,
+                                                  instance_path=instance_fp,
+                                                  data_type='seg',
+                                                  cam2world=cam2world,
+                                                  intrinsics=intrinsics,
+                                                  img_sidelength=img_sidelength)
+                              for instance_idx, instance_fp in enumerate(tot_imgs)]
+        
+        self.num_instances = len(self.all_instances)
+
+        self.color_map = torch.tensor(_COLOR_MAP, dtype=torch.float32) / 255.0
+        self.num_per_instance_observations = [len(obj) for obj in self.all_instances]
+        
+        print('> Load %d instances from %s.' % (self.num_instances, root_dir))
+
+
+class FaceRealDataset(FaceClassDataset):
+
+    def __init__(self,
+                 root_dir,
+                 ckpt_dir=None,
+                 img_sidelength=128,
+                 num_instances=100
+                 ):
+
+        # _CM_DATA_ROOT = '/data/anpei/facial-data/CelebAMask-HQ/segmap/subfolder'
+
+        all_imgs = glob(os.path.join(root_dir, '*.npy'))
+        all_instances = set([x.split('_')[0] for x in all_imgs])
+
+        _DEFAULT_INT = os.path.join(root_dir, 'intrinsics.txt')
+        _DEFAULT_CAM = os.path.join(root_dir, 'cam2world.npy')
+
+        idx_fp = os.path.join(ckpt_dir, 'indexing.txt') if ckpt_dir is not None else None
+            
+        if idx_fp is not None and os.path.exists(idx_fp):
+            print('> Load indexing file from: ', idx_fp)
+            with open(idx_fp, 'r') as f:
+                tot_imgs = [x.strip() for x in f.readlines()]
+
+        else:
+            tot_imgs = sorted(glob(os.path.join(root_dir, '*.png')))
+
+            if num_instances > 0 and num_instances < len(tot_imgs):
+                import random
+                tot_imgs = random.choices(tot_imgs, k=num_instances)
+             # save indexing dict
+            with open(idx_fp, 'w') as f:
+                f.writelines('\n'.join(tot_imgs))
+
+        print('Load CelebA, num_instances = ', len(tot_imgs))
+
+        if isinstance(num_instances, int):
+            num_instances = list(range(num_instances))
+
+        intrinsics = data_util.parse_intrinsics(
+            _DEFAULT_INT, trgt_sidelength=img_sidelength)
+
+        cam2world = np.load(_DEFAULT_CAM)
+
+        self.all_instances = [FaceInstanceDataset(instance_idx=instance_idx,
+                                                  instance_path=instance_fp,
+                                                  data_type='seg',
+                                                  cam2world=cam2world,
+                                                  intrinsics=intrinsics,
+                                                  img_sidelength=img_sidelength)
+                              for instance_idx, instance_fp in enumerate(tot_imgs)]
+        
+        self.num_instances = len(self.all_instances)
+
+        self.color_map = torch.tensor(_COLOR_MAP, dtype=torch.float32) / 255.0
+        self.num_per_instance_observations = [len(obj) for obj in self.all_instances]
+        
+        print('> Load %d instances from %s.' % (self.num_instances, root_dir))

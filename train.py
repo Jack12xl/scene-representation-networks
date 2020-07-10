@@ -82,6 +82,8 @@ p.add_argument('--max_num_observations_val', type=int, default=10, required=Fals
 
 p.add_argument('--has_params', action='store_true', default=False,
                help='Whether each object instance already comes with its own parameter vector.')
+p.add_argument('--animated', action='store_true', default=False,
+               help='Whether each object instance already comes with its own parameter vector.')
 
 # Model options
 p.add_argument('--tracing_steps', type=int, default=10, help='Number of steps of intersection tester.')
@@ -129,7 +131,6 @@ def train():
                                     shuffle=False,
                                     drop_last=True,
                                     collate_fn=val_dataset.collate_fn)
-
     model = SRNsModel(num_instances=train_dataset.num_instances,
                       latent_dim=opt.embedding_size,
                       has_params=opt.has_params,

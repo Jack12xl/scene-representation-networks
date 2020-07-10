@@ -4,7 +4,6 @@ import torch
 from torch.nn import functional as F
 import util
 
-
 def compute_normal_map(x_img, y_img, z, intrinsics):
     cam_coords = lift(x_img, y_img, z, intrinsics)
     cam_coords = util.lin2img(cam_coords)
@@ -65,7 +64,7 @@ def expand_as(x, y):
     return x
 
 
-def lift(x, y, z, intrinsics, homogeneous=False):
+def lift(x, y, z, intrinsics, homogeneous=False, orthogonal=False):
     '''
 
     :param self:
@@ -77,8 +76,12 @@ def lift(x, y, z, intrinsics, homogeneous=False):
     '''
     fx, fy, cx, cy = parse_intrinsics(intrinsics)
 
-    x_lift = (x - expand_as(cx, x)) / expand_as(fx, x) * z
-    y_lift = (y - expand_as(cy, y)) / expand_as(fy, y) * z
+    if orthogonal:
+        x_lift = (x - expand_as(cx, x)) / expand_as(fx, x)
+        y_lift = (y - expand_as(cy, y)) / expand_as(fy, y)
+    else:
+        x_lift = (x - expand_as(cx, x)) / expand_as(fx, x) * z
+        y_lift = (y - expand_as(cy, y)) / expand_as(fy, y) * z
 
     if homogeneous:
         return torch.stack((x_lift, y_lift, z, torch.ones_like(z).cuda()), dim=-1)

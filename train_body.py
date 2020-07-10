@@ -8,8 +8,10 @@ import numpy as np
 from dataset.body_dataset import BodyPartDataset
 
 from torch.utils.data import DataLoader
-from srns import *
-import util
+
+from modeling import SIFModel
+
+from modeling import util
 import random
 import re
 
@@ -99,7 +101,7 @@ p.add_argument('--fit_single_srn', action='store_true', required=False,
                help='Only fit a single SRN for a single scene (not a class of SRNs) --> no hypernetwork')
 p.add_argument('--use_unet_renderer', action='store_true',
                help='Whether to use a DeepVoxels-style unet as rendering network or a per-pixel 1x1 convnet')
-p.add_argument('--use_image_encoder', action='store_true',
+p.add_argument('--use_encoder', action='store_true',
                help='Whether to use a resnet based image encoder')
 p.add_argument('--embedding_size', type=int, default=256,
                help='Dimensionality of latent embedding.')
@@ -166,7 +168,7 @@ def train():
                       latent_dim=opt.embedding_size,
                       fit_single_srn=opt.fit_single_srn,
                       use_unet_renderer=opt.use_unet_renderer,
-                      use_image_encoder=opt.use_image_encoder,
+                      use_encoder=opt.use_encoder,
                       tracing_steps=opt.tracing_steps,
                       freeze_networks=opt.freeze_networks,
                       out_channels=opt.out_channels,

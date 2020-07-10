@@ -74,9 +74,9 @@ def _load_seg_img(img_fp, trgt_sidelength=256, margin=10, crop=True, intrinsics=
         cy -= shift_y
 
         seg_img = seg_img[bbox[0]:bbox[2], bbox[1]:bbox[3]]
-        print('crop image: (%d,%d)->(%d,%d)'%(H, W, seg_img.shape[0], seg_img.shape[1]))
+        # print('crop image: (%d,%d)->(%d,%d)'%(H, W, seg_img.shape[0], seg_img.shape[1]))
 
-        H = W = sidelength
+        H, W = seg_img.shape
     
     if trgt_sidelength is not None:
         cx *= (trgt_sidelength / W)
@@ -84,7 +84,7 @@ def _load_seg_img(img_fp, trgt_sidelength=256, margin=10, crop=True, intrinsics=
         fx *= (trgt_sidelength / W)
         fy *= (trgt_sidelength / H)
 
-        print('resice seg image: (%d, %d) -> (%d, %d)'%(H, W, trgt_sidelength, trgt_sidelength))
+        # print('resize seg image: (%d, %d) -> (%d, %d)'%(H, W, trgt_sidelength, trgt_sidelength))
 
         seg_img = cv2.resize(seg_img, (trgt_sidelength, trgt_sidelength), interpolation=cv2.INTER_NEAREST)
 
@@ -95,7 +95,7 @@ def _load_seg_img(img_fp, trgt_sidelength=256, margin=10, crop=True, intrinsics=
 
     seg_img = seg_img[None, :, :]
     seg_img = seg_img.reshape(seg_img.shape[0], -1).transpose(1, 0)
-    print(seg_img.shape)
+    # print(seg_img.shape)
 
     return seg_img, intrinsics
 
@@ -281,7 +281,7 @@ class BPInstanceDataset():
 
         sample = {
             'instance_idx': torch.Tensor([self.instance_idx]).squeeze(),
-            'observation_idx': idx,
+            'observation_idx': cam_id,
             'rgb': torch.from_numpy(img).float(),
             'pose': torch.from_numpy(pose).float(),
             'uv': uv,
@@ -309,7 +309,6 @@ class BPInstanceRandomPose(BPInstanceDataset):
         self.poses = _get_random_poses(
             sample_radius, num_samples=num_observations, mode=mode)
             
-
 
 class BodyPartDataset(torch.utils.data.Dataset):
     """Dataset for 1000 face segs with 25 views each, where each datapoint is a FaceInstanceDataset.
@@ -432,7 +431,7 @@ class BPRandomPoseDataset(BodyPartDataset):
 
         intrinsics = data_util.parse_intrinsics(_DEFAULT_INT, trgt_sidelength=img_sidelength)
 
-        self.all_instances = [FaceInstanceRandomPose(   instance_idx=idx,
+        self.all_instances = [BPInstanceRandomPose(   instance_idx=idx,
                                                         intrinsics=intrinsics,
                                                         num_observations=num_observations,
                                                         sample_radius=sample_radius,
